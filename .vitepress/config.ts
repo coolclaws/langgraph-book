@@ -5,7 +5,7 @@ export default defineConfig({
   description: '深入剖析 LangGraph —— 基于 Pregel 模型的 AI Agent 状态机框架',
   lang: 'zh-CN',
 
-  base: '/langgraph-book/',
+  base: '/',
 
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/langgraph-book/favicon.svg' }],
