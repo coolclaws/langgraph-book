@@ -1,0 +1,32 @@
+<svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="graph-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38b2ac"/>
+      <stop offset="100%" stop-color="#276749"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="60" cy="60" r="54" fill="url(#graph-gradient)" opacity="0.15"/>
+  <circle cx="60" cy="60" r="54" stroke="url(#graph-gradient)" stroke-width="3" fill="none"/>
+  <!-- Graph edges -->
+  <line x1="35" y1="35" x2="85" y2="35" stroke="#38b2ac" stroke-width="2.5" opacity="0.6"/>
+  <line x1="35" y1="35" x2="35" y2="85" stroke="#38b2ac" stroke-width="2.5" opacity="0.6"/>
+  <line x1="35" y1="35" x2="60" y2="60" stroke="#38b2ac" stroke-width="2.5"/>
+  <line x1="85" y1="35" x2="60" y2="60" stroke="#38b2ac" stroke-width="2.5"/>
+  <line x1="35" y1="85" x2="60" y2="60" stroke="#38b2ac" stroke-width="2.5"/>
+  <line x1="60" y1="60" x2="85" y2="85" stroke="#38b2ac" stroke-width="2.5"/>
+  <!-- Arrow on edge -->
+  <polygon points="80,80 85,85 78,83" fill="#38b2ac"/>
+  <!-- Graph nodes -->
+  <circle cx="35" cy="35" r="8" fill="#38b2ac"/>
+  <circle cx="85" cy="35" r="8" fill="#2d8a7e"/>
+  <circle cx="35" cy="85" r="8" fill="#2d8a7e"/>
+  <circle cx="60" cy="60" r="10" fill="#276749"/>
+  <circle cx="85" cy="85" r="8" fill="#1a4731"/>
+  <!-- Node labels -->
+  <text x="60" y="64" text-anchor="middle" fill="white" font-size="10" font-weight="bold">S</text>
+  <text x="35" y="39" text-anchor="middle" fill="white" font-size="8" font-weight="bold">A</text>
+  <text x="85" y="39" text-anchor="middle" fill="white" font-size="8" font-weight="bold">B</text>
+  <text x="35" y="89" text-anchor="middle" fill="white" font-size="8" font-weight="bold">C</text>
+  <text x="85" y="89" text-anchor="middle" fill="white" font-size="8" font-weight="bold">E</text>
+</svg>
