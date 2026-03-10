@@ -436,6 +436,268 @@ def review_workflow(topic: str) -> dict:
 
 恢复时，`compose_essay` 的结果从 checkpoint 中恢复（不会重新执行），而 `interrupt()` 返回用户提供的 resume 值。
 
+## 可注入参数详解
+
+entrypoint 函数除了必须的第一个输入参数外，还支持几种注入参数：
+
+### previous 参数
+
+```python
+@entrypoint(checkpointer=InMemorySaver())
+def my_workflow(
+    input_data: str,
+    previous: Optional[str] = None
+) -> str:
+    if previous:
+        return f"续接: {previous} -> {input_data}"
+    return f"首次: {input_data}"
+
+config = {"configurable": {"thread_id": "thread-1"}}
+
+my_workflow.invoke("hello", config)   # "首次: hello"
+my_workflow.invoke("world", config)   # "续接: hello -> world"
+```
+
+`previous` 的值来自 `PREVIOUS` channel -- 即上次执行中写入 checkpoint 的值。这是 Functional API 实现跨调用状态持续的核心机制。
+
+PREVIOUS channel 在 Pregel 图中的定义：
+
+```python
+# libs/langgraph/langgraph/_internal/_constants.py
+PREVIOUS = sys.intern("__previous__")
+```
+
+```python
+# entrypoint.__call__ 中
+channels={
+    # ...
+    PREVIOUS: LastValue(save_type, PREVIOUS),
+}
+```
+
+### config 参数
+
+```python
+@entrypoint()
+def my_workflow(input_data: str, config: RunnableConfig) -> str:
+    thread_id = config["configurable"]["thread_id"]
+    return f"Running on thread: {thread_id}"
+```
+
+### runtime 参数
+
+```python
+@entrypoint(store=my_store)
+def my_workflow(input_data: str, runtime: Runtime) -> str:
+    # 访问 store
+    items = runtime.store.search(("namespace",))
+    # 使用 stream writer
+    runtime.writer("intermediate result")
+    return "done"
+```
+
+## entrypoint.final 的类型推导
+
+entrypoint 的 `__call__` 方法中有一段精细的返回类型推导逻辑：
+
+```python
+# libs/langgraph/langgraph/func/__init__.py
+output_type, save_type = Any, Any
+if sig.return_annotation is not inspect.Signature.empty:
+    if sig.return_annotation is entrypoint.final:
+        # 未参数化的 entrypoint.final，两者都是 Any
+        output_type = save_type = Any
+    else:
+        origin = get_origin(sig.return_annotation)
+        if origin is entrypoint.final:
+            type_annotations = get_args(sig.return_annotation)
+            if len(type_annotations) != 2:
+                raise TypeError(
+                    "Please an annotation for both the return_ and "
+                    "the save values."
+                )
+            output_type, save_type = get_args(sig.return_annotation)
+        else:
+            # 普通返回类型：output 和 save 相同
+            output_type = save_type = sig.return_annotation
+```
+
+三种情况：
+1. **`-> entrypoint.final`**（未参数化）：`output_type = save_type = Any`
+2. **`-> entrypoint.final[int, str]`**（参数化）：`output_type = int`, `save_type = str`
+3. **`-> int`**（普通类型）：`output_type = save_type = int`
+
+## 不支持生成器函数
+
+```python
+if inspect.isgeneratorfunction(func) or inspect.isasyncgenfunction(func):
+    raise NotImplementedError(
+        "Generators are not supported in the Functional API."
+    )
+```
+
+如果需要流式输出中间结果，应使用 `StreamWriter`（通过 `runtime.writer` 注入），而非 Python 的 yield 语法。
+
+## Serde Allowlist：严格序列化白名单
+
+在启用严格序列化模式（`STRICT_MSGPACK_ENABLED`）时，Functional API 会构建一个类型白名单：
+
+```python
+# libs/langgraph/langgraph/func/__init__.py
+if _serde.STRICT_MSGPACK_ENABLED:
+    serde_allowlist = _serde.build_serde_allowlist(
+        schemas=[input_type, output_type, save_type]
+        + ([self.context_schema] if self.context_schema is not None else []),
+        channels=graph.channels,
+    )
+    graph._serde_allowlist = serde_allowlist
+    graph.checkpointer = _serde.apply_checkpointer_allowlist(
+        graph.checkpointer, serde_allowlist
+    )
+```
+
+白名单基于函数签名中的类型注解（input_type、output_type、save_type）和 context_schema 生成。只有白名单中的类型可以被序列化/反序列化，防止意外的对象类型被 checkpoint 系统处理。
+
+## stream_eager=True 的含义
+
+在 Pregel 构建中，`stream_eager=True` 被设置：
+
+```python
+graph = Pregel(
+    # ...
+    stream_eager=True,
+    # ...
+)
+```
+
+这意味着 Functional API 的图在执行时会急切地发射 stream 事件，而不是等到整个 superstep 完成。对于长时间运行的 entrypoint（内部有多个 task 调用和 interrupt），这保证了中间结果能及时流式输出。
+
+## identifier() 函数：函数标识
+
+```python
+# libs/langgraph/langgraph/pregel/_call.py
+def identifier(obj: Any, name: str | None = None) -> str | None:
+    """Return the module and name of an object."""
+    if isinstance(obj, PregelNode):
+        obj = obj.bound
+    if isinstance(obj, RunnableSeq):
+        obj = obj.steps[0]
+    if isinstance(obj, RunnableCallable):
+        obj = obj.func
+    if name is None:
+        name = getattr(obj, "__qualname__", None)
+    if name is None:
+        name = getattr(obj, "__name__", None)
+    if name is None:
+        return None
+
+    module_name = getattr(obj, "__module__", None)
+    ...
+```
+
+`identifier()` 会穿透各种包装层找到原始函数，获取其 `__qualname__` 和 `__module__`。这个标识符用于：
+- 缓存 key 生成（`CACHE_NS_WRITES` + identifier）
+- 调试和日志输出
+- 函数去重（CACHE 字典的 key）
+
+## _TaskFunction 的 cache 操作
+
+```python
+# libs/langgraph/langgraph/func/__init__.py
+def clear_cache(self, cache: BaseCache) -> None:
+    """Clear the cache for this task."""
+    if self.cache_policy is not None:
+        cache.clear(
+            ((CACHE_NS_WRITES, identifier(self.func) or "__dynamic__"),)
+        )
+
+async def aclear_cache(self, cache: BaseCache) -> None:
+    """Clear the cache for this task."""
+    if self.cache_policy is not None:
+        await cache.aclear(
+            ((CACHE_NS_WRITES, identifier(self.func) or "__dynamic__"),)
+        )
+```
+
+缓存的 namespace 是 `(CACHE_NS_WRITES, func_identifier)`。如果函数没有可识别的标识符（如 lambda 或动态创建的函数），使用 `"__dynamic__"` 作为后备。
+
+## 与 StateGraph 的对比总结
+
+| 维度 | StateGraph | Functional API |
+|------|-----------|----------------|
+| 编程模型 | 声明式（图结构） | 命令式（函数调用） |
+| 底层结构 | 多节点 Pregel 图 | 单节点 Pregel 图 |
+| Channel 数量 | N 个（每个状态字段一个） | 3 个（START/END/PREVIOUS） |
+| 状态管理 | 显式 State schema + reducer | `previous` 参数 + `entrypoint.final` |
+| 路由 | `add_edge` / `add_conditional_edges` | 函数内 if/else 逻辑 |
+| 并发 | 同一 superstep 的多节点 | `asyncio.gather` / futures |
+| 子图支持 | 原生支持 | 可作为 StateGraph 的节点 |
+| 可视化 | 丰富的拓扑图 | 简单（单节点） |
+
+## 完整实战示例
+
+```python
+import time
+import asyncio
+from langgraph.func import entrypoint, task
+from langgraph.types import interrupt, Command
+from langgraph.checkpoint.memory import InMemorySaver
+
+@task
+def compose_essay(topic: str) -> str:
+    time.sleep(1.0)
+    return f"An essay about {topic}"
+
+@task
+def check_grammar(text: str) -> str:
+    time.sleep(0.5)
+    return f"Grammar check: {text[:50]}... OK"
+
+@entrypoint(checkpointer=InMemorySaver())
+def review_workflow(topic: str) -> dict:
+    """Essay generation and review workflow."""
+    # 并行执行 essay 生成和语法检查准备
+    essay_future = compose_essay(topic)
+    essay = essay_future.result()
+
+    grammar_future = check_grammar(essay)
+    grammar = grammar_future.result()
+
+    # interrupt 等待人工审核
+    human_review = interrupt({
+        "question": "Please provide a review",
+        "essay": essay,
+        "grammar": grammar
+    })
+
+    return {
+        "essay": essay,
+        "grammar": grammar,
+        "review": human_review,
+    }
+
+config = {"configurable": {"thread_id": "review-1"}}
+
+# 第一次调用：生成 essay 后中断
+for result in review_workflow.stream("cats", config):
+    print(result)
+
+# 恢复执行：compose_essay 和 check_grammar 不会重新执行
+for result in review_workflow.stream(
+    Command(resume="Great essay!"),
+    config
+):
+    print(result)
+```
+
+## Functional API 的限制
+
+1. **单入口**：每个 entrypoint 只有一个入口函数
+2. **不支持生成器**：不能使用 yield，需要用 StreamWriter
+3. **单节点图**：底层只有一个节点，所有逻辑在一个 superstep 内
+4. **可视化有限**：图结构简单，不如 StateGraph 的拓扑图直观
+5. **子图限制**：entrypoint 可以作为 StateGraph 的节点，但在 entrypoint 内部嵌入子图需要额外处理
+
 ## 本章要点
 
 1. **Functional API 是 Pregel 的语法糖**：`@entrypoint` 创建一个单节点的 Pregel 图，包含 START、END、PREVIOUS 三个 channel。底层执行引擎与 StateGraph 完全相同。
@@ -448,4 +710,12 @@ def review_workflow(topic: str) -> dict:
 
 5. **task 的 Runnable 包装**：同步函数自动创建异步版本。task 执行结果写入 RETURN channel，被 checkpointer 记录，支持恢复时跳过已完成的 task。
 
-6. **cache 与 identifier**：task 的缓存 key 基于函数的模块路径和限定名（`module.qualname`）。动态创建的函数无法被缓存。
+6. **cache 与 identifier**：task 的缓存 key 基于函数的模块路径和限定名（`module.qualname`）。动态创建的函数使用 `"__dynamic__"` 作为后备标识。
+
+7. **类型推导的三种情况**：`entrypoint.final[R, S]` 分别提取 output 和 save 类型；未参数化的 `entrypoint.final` 使用 Any；普通类型两者相同。
+
+8. **stream_eager=True**：Functional API 的图急切发射 stream 事件，确保长时间运行的 entrypoint 中间结果能及时输出。
+
+9. **严格序列化白名单**：在 `STRICT_MSGPACK_ENABLED` 模式下，基于函数签名类型注解构建白名单，确保 checkpoint 安全。
+
+10. **与 StateGraph 互补**：Functional API 适合函数式工作流，StateGraph 适合图结构化工作流。两者底层共享同一个 Pregel 引擎。

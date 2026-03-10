@@ -572,6 +572,27 @@ for character in (NS_SEP, NS_END):
 
 子图的节点名可以与父图相同，因为命名空间机制会自动隔离。
 
+### Checkpointer 策略建议
+
+```python
+# 策略 1：子图继承父图 checkpointer（默认推荐）
+# 子图共享父图的 checkpointer，但在独立 namespace 下
+sub_graph = sub_builder.compile()  # checkpointer=None
+
+# 策略 2：子图独立启用
+# 子图使用 checkpointer=True，获得完全独立的 checkpoint 管理
+sub_graph = sub_builder.compile(checkpointer=True)
+
+# 策略 3：子图禁用 checkpointer
+# 适合纯计算型子图，不需要持久化
+sub_graph = sub_builder.compile(checkpointer=False)
+```
+
+选择策略时的考量：
+- 默认策略（`None`）适用于大多数场景，子图自动继承父图的 checkpointer，checkpoint 存储在独立 namespace 下
+- `True` 适用于需要完全独立的 checkpoint 历史的子图
+- `False` 适用于纯计算型子图，减少不必要的序列化开销
+
 ## 本章要点
 
 1. **命名空间格式**：`{node}{NS_END}{task_id}`（即 `node:task_id`）表示一层，多层用 `NS_SEP`（即 `|`）分隔。这种层级结构保证了每次执行的唯一性。
